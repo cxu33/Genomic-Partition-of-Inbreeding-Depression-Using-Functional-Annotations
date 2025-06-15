@@ -1,0 +1,516 @@
+---
+title: "Genomic_partitioning_seq_allJercow"
+output: html_document
+date: "2024-04-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r,message=FALSE, warning=FALSE}
+# Load required R packeages
+library(ggplot2)
+library(tidyr)
+library(MASS)
+library(dplyr)
+library(knitr)
+```
+## Data preparation
+Data cleaning was performed when converting vcf files to Plink2 format genotype files, with Plink2 options `--geno 0.1 --maf 0.01 --hwe 1.0e-6 midp --extract-if-info "INFO > 0.3"`. No samples have been removed from data cleaning.
+Variants names were added to cleaned genotype files with Plink2 option `--set-all-var-ids @:#` for further analysis.
+## Whole-genome inbreeding coefficient
+The whole genome inbreeding coefficients were calculated for 248,488 Jersey cows that have been genotyped, the inbreeding measure FUNI(the correlation between uniting gametes) was calculated with Plink1.9 option `--ibc` denoted by Fhat3 and used for further analysis. 9,532,696 variants and 248,488 samples were used and the resulting .ibc file is stored as `ibc_Jercow_mky_seq/Jercow_mky_seq.%d.ibc` under the directory `/90daydata/shared/chang.xu/`.
+```{r, message=FALSE, warning=FALSE}
+# Weight the inbreeding coefficients calculated for each chromosome
+# Path template
+path_chr_ibc <- "/90daydata/shared/chang.xu/seq_all_Jercow/ibc_Jercow_mky_seq/Jercow_mky_seq.%d.ibc"
+# Variant counts for each chromosome 
+variant_counts <- c(564445,491976,411619,468726,438981,442131,418939,430349,399655,391026,408931,407856,274133,284807,347158,321337,305166,246091,236762,262318,253290,214826,280366,248622,172358,199661,191564,193874,225729) 
+# Calculate total number of variants
+total_variants <- 9532696
+# Initialize an empty data frame for the weighted Fhat3 values
+weighted_fhat3 <- NULL
+# Loop through each chromosome file
+for (i in 1:29) {
+    # Construct the file path
+    file_path <- sprintf(path_chr_ibc, i)
+    # Read the Fhat3 column and AnimalID from the file
+    df <- read.csv(file_path, header = T, sep = "")
+    # Subset to include only IID and Fhat3 columns
+    df <- df[, c('IID', 'Fhat3')]
+    # Calculate the weight for this chromosome
+    weight <- variant_counts[i] / total_variants
+    # Compute the weighted Fhat3
+    df$Fhat3 <- df$Fhat3 * weight
+    # Sum the weighted Fhat3 values across all chromosomes for each animal
+    if (is.null(weighted_fhat3)) {
+        weighted_fhat3 <- df
+    } else {
+        # Ensure that animal IDs match in all files
+        weighted_fhat3 <- merge(weighted_fhat3, df, by="IID")
+        weighted_fhat3$Fhat3 <- weighted_fhat3$Fhat3.x + weighted_fhat3$Fhat3.y
+        # Keep only necessary columns for next iteration
+        weighted_fhat3 <- weighted_fhat3[, c('IID', 'Fhat3')]
+        # Rename the Fhat3 column to prevent column name issues in subsequent merges
+        names(weighted_fhat3)[2] <- 'Fhat3'
+    }
+}
+# Create a histogram to show the distribution of whole-genome sequence FUNI inbreeding coefficient estimates and save it as `Whole_genome_het_dist.pdf` under the directory `/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/`
+pdf("/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Whole_genome_het_dist.pdf", width = 8, height = 6)
+hist(weighted_fhat3$Fhat3, main="Distribution of whole genome inbreeding coefficient", xlab="F")
+dev.off()
+# Normality check for FUNI(We don't expected FUNI to be normally distributed due to the presence of inbreeding)
+qqnorm(weighted_fhat3$Fhat3)
+qqline(weighted_fhat3$Fhat3, col = "red")
+```
+
+## Annotation mapping
+A perl script$^{[1]}$ `mke_snp_info.pl` was used for annotation mapping. SNP positions were extracted from pvar files then mapped onto genomic features. The genomic feature files contain the start positions and end positions of certain annotation types(cds, promoter, utr, intron, gerp). The output files include SNP positions and binary indicators(coded 0, 1) showing if the SNP is within the genomic feature. 
+
+## Annotation specific inbreeding coefficient
+Variants within specific genomic features were extracted from the cleaned genotype files with Plink2 option `--extract-col-cond-match`, then used in the calculation of annotation specific inbreeding coefficients.
+
+## Phenotype for multi-regression
+The raw productive trait file containing records of Milk, fat and protein traits for 255,346 individuals, which 6858 of them are bulls and 248,488 of them are cows. We subset the records for cows and store them in `milk_traits_F.csv`
+For each trait: the number of records are shown below:
+```{r, message=FALSE, warning=FALSE}
+## read in the phenotype records
+Pheno_milkyld <- read.csv("/90daydata/shared/chang.xu/milk_traits_F.csv", header = T)
+
+# Filter out NA values and create a long format frame
+Pheno_long <- Pheno_milkyld %>%
+  pivot_longer(cols = all_of(c("Milk", "Fat", "Protein")), names_to = "Variable", values_to = "Value") %>%
+  filter(!is.na(Value))
+
+# tables of basic statistics
+summary_pheno <- Pheno_long %>%
+  group_by(Variable) %>%
+  summarize(
+    Mean = mean(Value),
+    SD = sd(Value),
+    Median = median(Value)
+  )
+print(summary_pheno)
+write.csv(summary_pheno, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Phenotype_Summary", row.names = F)
+
+# Calculate Z-scores
+Pheno_long <- Pheno_long %>%
+  group_by(Variable) %>%
+  mutate(Z_Score = scale(Value))
+
+# Set a threshold for identifying outliers based on Z-scores
+threshold <- 2.5
+
+# Identify outliers
+outliers <- subset(Pheno_long, abs(Z_Score) > threshold)
+
+# Plotting the distribution of phenotype values grouped by trait
+dist <- ggplot(Pheno_long, aes(x = Value)) +
+  geom_histogram(binwidth = 0.1, fill = "skyblue", color = "black", alpha = 0.7) +
+  facet_wrap(~ Variable, scales = "free") +
+  labs(title = "Phenotype Value Distribution",
+       x = "Value",
+       y = "Frequency") +
+  theme_minimal()
+
+# Save the plots using the pdf graphics device
+pdf("/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Phenotype_Distribution_plot.pdf", width = 8, height = 6)
+print(dist)
+dev.off()
+```
+## Multi-regression
+```{r, message=FALSE, warning=FALSE}
+## Data preparing
+nt <- 3 # Number of traits
+nt_sq <- nt^2
+Annot <- 5 # Number of annotation types
+# Get the long format phenotypic values without NA and outliers
+Pheno_long_no_outlier <- subset(Pheno_long, abs(Z_Score) < threshold)
+# Summary of Phenotype without outliers
+summary_pheno_no_outlier <- Pheno_long_no_outlier %>%
+  group_by(Variable) %>%
+  summarize(
+    Mean = mean(Value),
+    SD = sd(Value),
+    Median = median(Value)
+  )
+print(summary_pheno_no_outlier)
+write.csv(summary_pheno_no_outlier, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Phenotype_no_outlier_Summary", row.names = F)
+
+# Create histograms to show distribution of cleaned phenotypic values
+pro_long <- Pheno_long_no_outlier %>% filter(Variable %in% c("Fat", "Protein"))
+pro_dist <- ggplot(pro_long, aes(x = Value)) +
+  geom_histogram(binwidth = 1, fill = "skyblue", alpha = 0.7) +
+  facet_grid(rows = vars(Variable), scales = "free") +
+  labs(title = "Yield Deviation of Fat and Protein",
+       x = "Value",
+       y = "Frequency") +
+  theme_minimal()
+milk_long <- Pheno_long_no_outlier %>% filter(Variable =="Milk")
+milk_dist <- ggplot(milk_long, aes(x = Value)) +
+  geom_histogram(binwidth = 1, fill = "skyblue", alpha = 0.7) +
+  facet_grid(rows = vars(Variable), scales = "free") +
+  labs(title = "Yield Deviation of Milk",
+       x = "Value",
+       y = "Frequency") +
+  theme_minimal()
+pdf("/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Pro_Phenotype_Distribution_plot.pdf", width = 8, height = 6)
+print(pro_dist)
+dev.off()
+pdf("/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Milk_Phenotype_Distribution_plot.pdf", width = 8, height = 6)
+print(milk_dist)
+dev.off()
+# Number of SNPs in specific annotations
+m <- data.frame(annot=c("cds", "promoter", "utr", "intron", "gerp"), 
+                m=c(70838, 121762, 44268, 3088751, 115275))
+M <- 9532696 ## total number of variants
+## Whole-genome inbreeding is in `weighted_fhat3$Fhat3`
+## Annotation specific inbreeding
+Fk1 <- read.table("/90daydata/shared/chang.xu/seq_all_Jercow/cds_seq_allJercow.ibc", header = T, sep = "") 
+Fk2 <- read.table("/90daydata/shared/chang.xu/seq_all_Jercow/promoter_seq_allJercow.ibc", header = T, sep = "")
+Fk3 <- read.table("/90daydata/shared/chang.xu/seq_all_Jercow/utr_seq_allJercow.ibc", header = T, sep = "")
+Fk4 <- read.table("/90daydata/shared/chang.xu/seq_all_Jercow/intron_seq_allJercow.ibc", header = T, sep = "")
+Fk5 <- read.table("/90daydata/shared/chang.xu/seq_all_Jercow/gerp_seq_allJercow.ibc", header = T, sep = "")
+Fk_ls <- list(Fk1, Fk2, Fk3, Fk4, Fk5)
+# Check if the IDs match
+are_IID_equal <- identical(Fk1$IID, weighted_fhat3$IID)&&
+  identical(Fk1$IID, Fk2$IID) &&
+  identical(Fk1$IID, Fk3$IID) &&
+  identical(Fk1$IID, Fk4$IID) &&
+  identical(Fk1$IID, Fk5$IID)
+Fk_Fg <- data.frame(IID=Fk1$IID, Fg=weighted_fhat3$Fhat3, 
+                    cds=Fk1$Fhat3, promoter=Fk2$Fhat3, 
+                    utr=Fk3$Fhat3, intron=Fk4$Fhat3, gerp=Fk5$Fhat3)
+## Linear regression analysis (Yengo Method)
+pi_k <- m$m/M
+Pik <- (pi_k)/(1-pi_k)             ## proportion of SNPs in annotations
+# Calculate Dk for each column using mapply
+Dk_list <- mapply(function(col, pik) pik * (col - Fk_Fg$Fg), Fk_Fg[, -c(1, 2)], Pik)
+# Create a data frame from the matrix
+result_df <- data.frame(IID = Fk_Fg$IID, Fg=Fk_Fg$Fg, Dk_list)
+# Rename the columns
+colnames(result_df)[-c(1,2)] <- paste0(colnames(Fk_Fg)[3:ncol(Fk_Fg)], "_Dk")
+Pheno_wide_no_outlier <- pivot_wider(Pheno_long_no_outlier, id_cols = IID, names_from = Variable, values_from = Value)
+# Scale phenotype
+pheno_scaled <- Pheno_wide_no_outlier
+pheno_scaled[, c("Milk", "Fat", "Protein")] <- scale(Pheno_wide_no_outlier[, c("Milk", "Fat", "Protein")])
+pheno_scaled_long <- pheno_scaled %>%
+  pivot_longer(cols = all_of(c("Milk", "Fat", "Protein")), names_to = "Variable", values_to = "Value") %>%
+  filter(!is.na(Value))
+# Summary of scaled phenotype
+summary_scaled_pheno <- pheno_scaled_long %>%
+  group_by(Variable) %>%
+  summarize(
+    Mean = mean(Value),
+    SD = sd(Value),
+    Median = median(Value)
+  )
+# Merge values for each trait and Dk and store them in list
+dataFinal <- merge(pheno_scaled_long, result_df, by = "IID")
+# prepare covariates for slemm
+pheno <- pheno_scaled %>%
+   mutate_all(~ ifelse(is.na(.), "", .))
+annot_covar <- merge(Pheno_milkyld, result_df, by = "IID")
+annot_covar <- annot_covar[,-c(2,3,4,5)]
+intercept <- rep(1, nrow(annot_covar))
+annot_covar <- cbind(annot_covar$IID, intercept, annot_covar[,-1])
+colnames(annot_covar) <- c("iid","intercept","Fg","cds","promoter","utr","intron","gerp")
+write.csv(pheno, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/pheno_r.csv", quote = F, row.names = F, sep = ",")
+write.csv(annot_covar, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/annot_covariate.csv", quote = F, row.names = F, sep = ",")
+
+## Check the distribution of partial inbreeding coefficients
+partial_het <- merge(Fk_Fg, pheno, by="IID")
+partial_het <- data.frame(
+  annot = rep(c("cds", "gerp", "intron", "promoter", "utr"), each = nrow(partial_het)),
+  het = c(partial_het$cds, partial_het$gerp, partial_het$intron, partial_het$promoter, partial_het$utr)
+)
+
+partial_inbreeding_dist <- ggplot(partial_het, aes(x = het)) +
+  geom_histogram(binwidth = 0.01, fill = "skyblue", color = "black", alpha = 0.7) +
+  facet_grid(rows = vars(annot)) +
+  labs(title = "Distribution of Partial Inbreeding Coefficient",
+       x = "Het",
+       y = "Frequency") +
+  theme_minimal()
+pdf("/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/partial_het_dist.pdf", width = 8, height = 6)
+print(partial_inbreeding_dist)
+dev.off()
+# Dk distribution
+dk_list <- as.data.frame(Dk_list)
+Dk <- data.frame(annot=rep(c("cds","gerp","intron","promoter","utr"),each=nrow(Dk_list)),
+                 dk=c(dk_list$cds, dk_list$gerp, dk_list$intron, dk_list$promoter, dk_list$utr))
+Dk_dist <- ggplot(Dk, aes(x = dk)) +
+  geom_histogram(binwidth = 0.00001, fill = "skyblue", color = "black", alpha = 0.7) +
+  facet_grid(rows = vars(annot)) +
+  labs(title = "Distribution of Dk by seq",
+       x = "Dk",
+       y = "Frequency") +
+  theme_minimal()
+pdf("/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Dk_dist.pdf", width = 8, height = 6)
+print(Dk_dist)
+dev.off()
+# Define functions for regression model
+analyseSingleTrait <- function(data, trait, formula){
+  frm <- as.formula(formula)
+  mod <- lm(frm,data=data)
+  mod_summary <- summary(mod)$coefficients[-1,]
+  Bt  <- mod_summary[,1]; SE <- mod_summary[,2]; Pval <- mod_summary[,4]
+  bk  <- (Bt[2:6]+Bt[1])*pi_k
+  Delta_k     <- 1 + Bt[2:6]/Bt[1]
+  Direction <- rep("", length(Delta_k))
+  Fold <- rep("", length(Delta_k))
+  for (i in 1:5){
+    if(Delta_k[i]>1){
+    Direction[i]="Enrichment"
+    Fold[i] = Delta_k[i]
+  }else{
+    Direction[i]="Depletion"
+    Fold[i] = 1-(Delta_k[i]-1) * Pik[i] / (1-Pik[i])
+  }
+  }  
+  # Calculate AIC, BIC, and log-likelihood
+  model_aic <- AIC(mod)
+  model_bic <- BIC(mod)
+  model_loglik <- as.numeric(logLik(mod))
+  
+  Result <- cbind.data.frame(Annotation=c("cds", "promoter", "utr", "intron", "gerp"), ID_genome=Bt[1],SE_ID_genome=SE[1],P_ID_genome=Pval[1], Gamma_k=Bt[2:6],SE_Gamma_k=SE[2:6],P_Gamma_k=Pval[2:6], Delta_k=Delta_k, bk=bk, Fold=Fold, Trait=trait, Direction=Direction, AIC = model_aic, BIC = model_bic, LogLikelihood = model_loglik)
+  return(Result)
+}
+# Trait-specific enrichment
+traits <- unique(dataFinal$Variable)
+# fit linear model with only whole-genome inbreeding coefficient
+wg_results <- list()
+for (var in traits) {
+  trait_df <- dataFinal %>% filter(Variable == var)
+  mod <- lm(Value~Fg,data=trait_df)
+  mod_summary <- summary(mod)$coefficients[-1,]
+  Bt <- mod_summary[1]; SE <- mod_summary[2]; Pval <- mod_summary[4]
+  # Calculate AIC, BIC, and log-likelihood
+  model_aic <- AIC(mod)
+  model_bic <- BIC(mod)
+  model_loglik <- as.numeric(logLik(mod))
+  wg_result <-  cbind.data.frame(ID_genome=Bt, SE_ID_genome=SE, PVal_ID_genome=Pval, AIC = model_aic, BIC = model_bic, LogLikelihood = model_loglik, Trait=var)
+  wg_results[[var]] <- wg_result
+}
+wg_ID <- data.frame(wg_results)
+write.csv(wg_ID, file = "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Whole_genome_ID_lm_estimates", quote = F, row.names = F)
+
+# Fit only female traits
+results_F <- list()
+for (varf in traits) {
+  trait_df_F <- dataFinal %>% filter(Variable == varf) 
+  result_F <- analyseSingleTrait(trait_df_F, varf, "Value~Fg+cds_Dk+promoter_Dk+utr_Dk+intron_Dk+gerp_Dk")
+  results_F[[varf]] <- result_F
+}
+Enrichment_ID_F <- data.frame(results_F)
+write.csv(Enrichment_ID_F, file = "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Enrichment_lm_singletrait_female", quote = F, row.names = F)
+```
+## Linear regression analysis (Delta Method)
+```{r}
+data_rawID_mky_F <- merge(Fk_Fg, pheno_scaled, by = "IID")
+data_rawID_mky_F_long <- data_rawID_mky_F %>%
+  pivot_longer(cols = all_of(c("Milk", "Protein", "Fat")), names_to = "Variable", values_to = "Value") %>%
+  filter(!is.na(Value))
+lm_rawID <- function(data, trait, formula){
+  frm <- as.formula(formula)
+  mod <- lm(frm, data = data)
+  summary <- summary(mod)$coefficients
+  est <- summary[,1]; se <- summary[,2]; pval <- summary[,4]
+  cov <- vcov(mod)
+  
+  # Calculate AIC, BIC, and log-likelihood
+  model_aic <- AIC(mod)
+  model_bic <- BIC(mod)
+  model_loglik <- as.numeric(logLik(mod))
+  
+  Result <- cbind.data.frame(covar=c("intercept","Fg","cds", "promoter", "utr", "intron", "gerp"), trait = trait, est = est,se = se,pval = pval, cov, AIC = model_aic, BIC = model_bic, LogLikelihood = model_loglik)
+  return(Result)
+}
+results_F_rawID <- list()
+for (varf in traits){
+  trait_F_rawID <- data_rawID_mky_F_long %>% filter(Variable == varf)
+  result_F_rawID <- lm_rawID(trait_F_rawID, varf, "Value~Fg+cds+promoter+utr+intron+gerp")
+  results_F_rawID[[varf]] <- result_F_rawID
+}
+d_milk <- results_F_rawID[[1]]
+d_fat <- results_F_rawID[[2]]
+d_protein <- results_F_rawID[[3]]
+d.names <- c("d_milk","d_fat","d_protein")
+# delta method to correct for overlapping annotations
+sw = read.csv("/90daydata/shared/jicai.jiang/chang.xu/JE/seq.snp_info.csv")
+m = colSums(sw[,-1])
+cp = crossprod(as.matrix(sw[,-1]))
+id_coeff_list <- list()
+cov_id_list <- list()
+for (var in d.names){
+  d <- get(var)
+  id_coeff = cp %*% (d$est[-1]/m)
+  cov_id = cp %*% (diag(1/m) %*% as.matrix(d[2:nrow(d), 6:(6+Annot)]) %*% diag(1/m)) %*% t(cp)
+  id_coeff_list[[var]] <- id_coeff
+  cov_id_list[[var]] <- cov_id
+}
+
+# Delta method functions
+# Function to calculate the ratio y = [x2/x1, x3/x1, ..., xn/x1]
+ratio_func <- function(x) {
+  x[-1] / x[1]
+}
+# Function to calculate the gradient of the ratio function
+gradient_func <- function(x) {
+  n <- length(x)
+  grad <- matrix(0, nrow = n - 1, ncol = n)
+  grad[, 1] <- -x[-1] / x[1]^2
+  diag(grad[, -1]) <- 1 / x[1]
+  return(grad)
+}
+# End of Delta method functions
+id_enrichment_list <- list()
+se_enrichment_list <- list()
+for (var in d.names){
+  id_enrichment_list[[var]] = ratio_func(id_coeff_list[[var]])/(m[-1]/m[1])
+  se_enrichment_list[[var]] = sqrt(diag(gradient_func(id_coeff_list[[var]]) %*% cov_id_list[[var]] %*% t(gradient_func(id_coeff_list[[var]]))))/(m[-1]/m[1])
+}
+lm_rawID_est <- data.frame(results_F_rawID)
+write.csv(lm_rawID_est, file = "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/lm_rawID_est.csv", quote = F, row.names = F)
+id_enrichment <- data.frame(id_enrichment_list)
+write.csv(id_enrichment, file = "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/lm_ID_enrichment.csv", quote = F, row.names = F)
+se_enrichment <- data.frame(se_enrichment_list)
+write.csv(se_enrichment, file = "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/lm_ID_enrichment_se.csv", quote = F, row.names = F)
+```
+# Use unscaled phenotype in Delta Method to check if variance partitioning is affected by scaling phenotypic values
+```{r}
+raw_pheno_rawID <- merge(Pheno_wide_no_outlier, Fk_Fg, by = "IID")
+# fit the raw inbreeding coefficients first with slemm
+raw_pheno_rawID_long <- raw_pheno_rawID %>%
+  pivot_longer(cols = all_of(c("Milk", "Protein", "Fat")), names_to = "Variable", values_to = "Value") %>%
+  filter(!is.na(Value))
+wg_raw_results_list <- list()
+for (var in traits) {
+  trait_df <- raw_pheno_rawID_long %>% filter(Variable == var)
+  mod <- lm(Value~Fg,data=trait_df)
+  mod_summary <- summary(mod)$coefficients[-1,]
+  Bt <- mod_summary[1]; SE <- mod_summary[2]; Pval <- mod_summary[4]
+  # Calculate AIC, BIC, and log-likelihood
+  model_aic <- AIC(mod)
+  model_bic <- BIC(mod)
+  model_loglik <- as.numeric(logLik(mod))
+  wg_raw_results <-  cbind.data.frame(ID_genome=Bt, SE_ID_genome=SE, PVal_ID_genome=Pval, AIC = model_aic, BIC = model_bic, LogLikelihood = model_loglik, Trait=var)
+  wg_raw_results_list[[var]] <- wg_raw_results
+}
+wg_raw_results <- data.frame(wg_raw_results_list)
+
+lm_rawID <- function(data, trait, formula){
+  frm <- as.formula(formula)
+  mod <- lm(frm, data = data)
+  summary <- summary(mod)$coefficients
+  est <- summary[,1]; se <- summary[,2]; pval <- summary[,4]
+  cov <- vcov(mod)
+  
+  # Calculate AIC, BIC, and log-likelihood
+  model_aic <- AIC(mod)
+  model_bic <- BIC(mod)
+  model_loglik <- as.numeric(logLik(mod))
+  
+  Result <- cbind.data.frame(covar=c("intercept","Fg","cds", "promoter", "utr", "intron", "gerp"), est = est,se = se,pval = pval, cov, AIC = model_aic, BIC = model_bic, LogLikelihood = model_loglik)
+  return(Result)
+}
+results_raw_pheno_rawID <- list()
+for (varf in traits){
+  trait_raw_pheno_rawID <- raw_pheno_rawID_long %>% filter(Variable == varf)
+  result_raw_pheno_rawID <- lm_rawID(trait_raw_pheno_rawID, varf, "Value~Fg+cds+promoter+utr+intron+gerp")
+  results_raw_pheno_rawID[[varf]] <- result_raw_pheno_rawID
+}
+d_milk_raw <- results_raw_pheno_rawID[[1]]
+d_fat_raw <- results_raw_pheno_rawID[[2]]
+d_protein_raw <- results_raw_pheno_rawID[[3]]
+d.names <- c("d_milk_raw","d_fat_raw","d_protein_raw")
+# delta method to correct for overlapping annotations
+sw = read.csv("/90daydata/shared/jicai.jiang/chang.xu/JE/seq.snp_info.csv")
+m = colSums(sw[,-1])
+cp = crossprod(as.matrix(sw[,-1]))
+id_coeff_raw_list <- list()
+cov_id_raw_list <- list()
+for (var in d.names){
+  d <- get(var)
+  id_coeff_raw = cp %*% (d$est[-1]/m)
+  cov_id_raw = cp %*% (diag(1/m) %*% as.matrix(d[2:nrow(d), 6:(6+Annot)]) %*% diag(1/m)) %*% t(cp)
+  id_coeff_raw_list[[var]] <- id_coeff_raw
+  cov_id_raw_list[[var]] <- cov_id_raw
+}
+
+# Delta method functions
+# Function to calculate the ratio y = [x2/x1, x3/x1, ..., xn/x1]
+ratio_func <- function(x) {
+  x[-1] / x[1]
+}
+# Function to calculate the gradient of the ratio function
+gradient_func <- function(x) {
+  n <- length(x)
+  grad <- matrix(0, nrow = n - 1, ncol = n)
+  grad[, 1] <- -x[-1] / x[1]^2
+  diag(grad[, -1]) <- 1 / x[1]
+  return(grad)
+}
+# End of Delta method functions
+id_enrichment_raw_list <- list()
+se_enrichment_raw_list <- list()
+for (var in d.names){
+  id_enrichment_raw_list[[var]] = ratio_func(id_coeff_raw_list[[var]])/(m[-1]/m[1])
+  se_enrichment_raw_list[[var]] = sqrt(diag(gradient_func(id_coeff_raw_list[[var]]) %*% cov_id_raw_list[[var]] %*% t(gradient_func(id_coeff_raw_list[[var]]))))/(m[-1]/m[1])
+}
+```
+# For linear Mixed Model, fit the raw inbreeding coefficients first with slemm, GRM built with 60k chip data
+```{r}
+# Read in linear mixed model estimation for protein and annotation variants info
+sw = read.csv("/90daydata/shared/jicai.jiang/chang.xu/JE/seq.snp_info.csv")
+# get number of variants whole genome wide and in each annotation type
+m = colSums(sw[,-1])
+# variance-covariance matrix for seq snps
+cp = crossprod(as.matrix(sw[,-1]))
+# set path for reading LMM estimates 
+path_reml <- "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/%s_reml.reml.blue.csv"
+# traits we are analysing, annotation types we are using
+traits <- c("Milk", "Protein", "Fat")
+annot <- c("cds", "promoter", "utr", "intron", "gerp")
+# Delta method functions
+# Function to calculate the ratio y = [x2/x1, x3/x1, ..., xn/x1]
+ratio_func <- function(x) {
+  x[-1] / x[1]
+}
+# Function to calculate the gradient of the ratio function
+gradient_func <- function(x) {
+  n <- length(x)
+  grad <- matrix(0, nrow = n - 1, ncol = n)
+  grad[, 1] <- -x[-1] / x[1]^2
+  diag(grad[, -1]) <- 1 / x[1]
+  return(grad)
+}
+# End of Delta method functions
+# create lists to store results
+id_enrichment_list <- list()
+se_enrichment_list <- list()
+for (i in traits){
+  csv_path <- sprintf(path_reml, i)
+  d <- read.csv(csv_path, header = T, sep = ",")
+  # correct linear mixed model(raw ID as fixed effects+GRM built with chip data) estimates
+  # by proportion of variants in annotations and overlapping regions
+  id_coeff = cp %*% (d$blue[-1] / m)
+  cov_id = cp %*% ( diag(1/m) %*% as.matrix(d[2:nrow(d), 6:ncol(d)]) %*% diag(1/m) ) %*% t(cp)
+  id_enrichment_list[[i]] = ratio_func(id_coeff) / (m[-1] / m[1])
+  se_enrichment_list[[i]] = sqrt( diag( gradient_func(id_coeff) %*% cov_id %*%t(gradient_func(id_coeff)) ) ) / (m[-1] / m[1])
+}
+Milk_id_enrichment <- cbind.data.frame(Annot = annot, id_enrichment = id_enrichment_list[[1]])
+Protein_id_enrichment <- cbind.data.frame(Annot = annot, id_enrichment_list[[2]])
+Fat_id_enrichment <- cbind.data.frame(Annot = annot, id_enrichment_list[[3]])
+Milk_se_enrichment <- cbind.data.frame(Annot = annot, se_enrichment_list[[1]])
+Protein_se_enrichment <- cbind.data.frame(Annot = annot, se_enrichment_list[[2]])
+Fat_se_enrichment <- cbind.data.frame(Annot = annot, se_enrichment_list[[3]])
+write.csv(Milk_id_enrichment, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Milk_id_enrichment.csv", row.names = F, quote = F)
+write.csv(Protein_id_enrichment, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Protein_id_enrichment.csv", row.names = F, quote = F)
+write.csv(Fat_id_enrichment, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Fat_id_enrichment.csv", row.names = F, quote = F)
+write.csv(Milk_se_enrichment, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Milk_se_enrichment.csv", row.names = F, quote = F)
+write.csv(Protein_se_enrichment, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Protein_se_enrichment.csv", row.names = F, quote = F)
+write.csv(Fat_se_enrichment, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Fat_se_enrichment.csv", row.names = F, quote = F)
+```

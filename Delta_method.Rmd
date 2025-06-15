@@ -1,0 +1,103 @@
+---
+title: "Dealta_method"
+output: html_document
+date: "2024-04-23"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# read in linear mixed model estimation for protein and annotation variants info
+sw = read.csv("/90daydata/shared/jicai.jiang/chang.xu/JE/seq.snp_info.csv")
+# get number of variants whole genome wide and in each annotation type
+m = colSums(sw[,-1])
+# variance-covariance matrix for seq snps
+cp = crossprod(as.matrix(sw[,-1]))
+# set path for reading LMM estimates 
+path_reml <- "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/%s_reml.reml.blue.csv"
+# traits we are analysing, annotation types we are using
+traits <- c("Milk", "Protein", "Fat")
+annot <- c("cds", "promoter", "utr", "intron", "gerp")
+# Delta method functions
+# Function to calculate the ratio y = [x2/x1, x3/x1, ..., xn/x1]
+ratio_func <- function(x) {
+  x[-1] / x[1]
+}
+# Function to calculate the gradient of the ratio function
+gradient_func <- function(x) {
+  n <- length(x)
+  grad <- matrix(0, nrow = n - 1, ncol = n)
+  grad[, 1] <- -x[-1] / x[1]^2
+  diag(grad[, -1]) <- 1 / x[1]
+  return(grad)
+}
+# End of Delta method functions
+# create lists to store results
+id_enrichment_list <- list()
+se_enrichment_list <- list()
+for (i in traits){
+  csv_path <- sprintf(path_reml, i)
+  d <- read.csv(csv_path, header = T, sep = ",")
+  # correct linear mixed model(raw ID as fixed effects+GRM built with chip data) estimates
+  # by proportion of variants in annotations and overlapping regions
+  id_coeff = cp %*% (d$blue[-1] / m)
+  cov_id = cp %*% ( diag(1/m) %*% as.matrix(d[2:nrow(d), 6:ncol(d)]) %*% diag(1/m) ) %*% t(cp)
+  id_enrichment_list[[i]] = ratio_func(id_coeff) / (m[-1] / m[1])
+  se_enrichment_list[[i]] = sqrt( diag( gradient_func(id_coeff) %*% cov_id %*%t(gradient_func(id_coeff)) ) ) / (m[-1] / m[1])
+}
+Milk_id_enrichment <- cbind.data.frame(Annot = annot, id_enrichment = id_enrichment_list[[1]])
+Protein_id_enrichment <- cbind.data.frame(Annot = annot, id_enrichment_list[[2]])
+Fat_id_enrichment <- cbind.data.frame(Annot = annot, id_enrichment_list[[3]])
+Milk_se_enrichment <- cbind.data.frame(Annot = annot, se_enrichment_list[[1]])
+Protein_se_enrichment <- cbind.data.frame(Annot = annot, se_enrichment_list[[2]])
+Fat_se_enrichment <- cbind.data.frame(Annot = annot, se_enrichment_list[[3]])
+write.csv(Milk_id_enrichment, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Milk_id_enrichment.csv", row.names = F, quote = F)
+write.csv(Protein_id_enrichment, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Protein_id_enrichment.csv", row.names = F, quote = F)
+write.csv(Fat_id_enrichment, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Fat_id_enrichment.csv", row.names = F, quote = F)
+write.csv(Milk_se_enrichment, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Milk_se_enrichment.csv", row.names = F, quote = F)
+write.csv(Protein_se_enrichment, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Protein_se_enrichment.csv", row.names = F, quote = F)
+write.csv(Fat_se_enrichment, "/90daydata/shared/chang.xu/seq_all_Jercow/results_seq_all_Jercow/Fat_se_enrichment.csv", row.names = F, quote = F)
+```
+How to do selection using partial inbreeding coefficient：
+File: cds_jercow_mlkyld.ibc
+2_JER_76859396  2_JER_76859396  70838   0.0463657       0.0252835       0.0358246
+2_JER_84291594  2_JER_84291594  70838   0.0702649       -0.00214961     0.0340576
+
+File: intron_jercow_mlkyld.ibc
+2_JER_76859396  2_JER_76859396  3088751 0.0359444       0.030179        0.0330617
+2_JER_84291594  2_JER_84291594  3088751 -0.00216002     0.113172        0.0555059
+
+File: gerp_jercow_mlkyld.ibc
+2_JER_76859396  2_JER_76859396  115275  0.0462079       0.0435379       0.0448729
+2_JER_84291594  2_JER_84291594  115275  -0.00391279     0.07119 0.0336386
+
+File: promoter_jercow_mlkyld.ibc
+2_JER_76859396  2_JER_76859396  121762  -0.00422493     0.0891056       0.0424403
+2_JER_84291594  2_JER_84291594  121762  0.0398439       0.0373992       0.0386216
+
+File: utr_jercow_mlkyld.ibc
+2_JER_76859396  2_JER_76859396  44268   -0.0161539      0.107446        0.0456463
+2_JER_84291594  2_JER_84291594  44268   0.0451184       0.0349259       0.0400222
+```{r}
+par_F <- data.frame(
+  ind = rep(c("JER_76859396", "JER_84291594"), each = 5),
+  annotation = rep(c("Intron", "Promoter", "GERP", "CDS", "UTR"), times = 2),
+  F = c(0.0330617, 0.0424403, 0.0448729, 0.0358246, 0.0456463, 0.0555059, 0.0386216, 0.0336386, 0.0340576, 0.0400222)
+)
+print(par_F)
+library(ggplot2)
+p <- ggplot(par_F, aes(x = ind, y = F, fill = annotation)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.9)) +
+  geom_text(aes(label = round(F, 3)),
+            position = position_dodge(width = 0.9),
+            hjust = -0.1, 
+            size = 2, color = "black",
+            check_overlap = TRUE) +
+  labs(title = "Individuals with Different Annotation-level Inbreeding Coefficients",
+       x = "Individuals",
+       y = "Annotation-level Inbreeding Coefficients") +
+  coord_flip() +
+  theme_minimal()
+```

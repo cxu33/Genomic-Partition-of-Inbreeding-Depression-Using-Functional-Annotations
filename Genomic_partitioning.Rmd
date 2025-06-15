@@ -1,0 +1,124 @@
+---
+title: "Genomic_partitioning"
+output: html_document
+date: "2024-04-21"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(tidyr)
+library(MASS)
+library(dplyr)
+library(knitr)
+whole_het <- read.table("/90daydata/shared/chang.xu/jer_cowbull_cleaned_addedid_chip_bfile/Jercow_mky_chip.ibc", header=T, sep="")
+pdf("/90daydata/shared/chang.xu/filter_variants/group2/results_mky_all_Jercow/Whole_genome_het_dist.pdf", width = 8, height = 6)
+hist(whole_het$Fhat3, main="Distribution of whole genome inbreeding coefficient", xlab="F")
+dev.off()
+qqnorm(whole_het$Fhat3)
+qqline(whole_het$Fhat3, col = "red")
+Pheno_milkyld <- read.csv("/90daydata/shared/chang.xu/milk_traits_F.csv", header = T)
+Pheno_long <- Pheno_milkyld %>%
+  pivot_longer(cols = all_of(c("Milk", "Fat", "Protein")), names_to = "Variable", values_to = "Value") %>%
+  filter(!is.na(Value))
+Pheno_long <- Pheno_long %>%
+  group_by(Variable) %>%
+  mutate(Z_Score = scale(Value))
+threshold <- 2.5
+nt <- 3 # Number of traits
+nt_sq <- nt^2
+Annot <- 5 # Number of annotation types
+Pheno_long_no_outlier <- subset(Pheno_long, abs(Z_Score) < threshold)
+m <- data.frame(annot=c("cds", "promoter", "utr", "intron", "gerp"), 
+                m=c(10691, 18947, 6825, 502997, 18496))
+M <- 1521877 ## total number of variants
+Fk1 <- read.table("/90daydata/shared/chang.xu/jer_cowbull_cleaned_addedid_chip_bfile/Jercow_mky_chip_cds_ibc.ibc", header = T, sep = "") 
+Fk2 <- read.table("/90daydata/shared/chang.xu/jer_cowbull_cleaned_addedid_chip_bfile/Jercow_mky_chip_promoter_ibc.ibc", header = T, sep = "")
+Fk3 <- read.table("/90daydata/shared/chang.xu/jer_cowbull_cleaned_addedid_chip_bfile/Jercow_mky_chip_utr_ibc.ibc", header = T, sep = "")
+Fk4 <- read.table("/90daydata/shared/chang.xu/jer_cowbull_cleaned_addedid_chip_bfile/Jercow_mky_chip_intron_ibc.ibc", header = T, sep = "")
+Fk5 <- read.table("/90daydata/shared/chang.xu/jer_cowbull_cleaned_addedid_chip_bfile/Jercow_mky_chip_gerp_ibc.ibc", header = T, sep = "")
+Fk_ls <- list(Fk1, Fk2, Fk3, Fk4, Fk5)
+Fk_Fg <- data.frame(IID=Fk1$IID, Fg=whole_het$Fhat3, 
+                    cds=Fk1$Fhat3, promoter=Fk2$Fhat3, 
+                    utr=Fk3$Fhat3, intron=Fk4$Fhat3, gerp=Fk5$Fhat3)
+## Analysis
+pi_k <- m$m/M
+Pik <- (pi_k)/(1-pi_k)             ## proportion of SNPs in annotations
+# Calculate Dk for each column using mapply
+Dk_list <- mapply(function(col, pik) pik * (col - Fk_Fg$Fg), Fk_Fg[, -c(1, 2)], Pik)
+# Create a data frame from the matrix
+result_df <- data.frame(IID = Fk_Fg$IID, Fg=Fk_Fg$Fg, Dk_list)
+# Rename the columns
+colnames(result_df)[-c(1,2)] <- paste0(colnames(Fk_Fg)[3:ncol(Fk_Fg)], "_Dk")
+Pheno_wide_no_outlier <- pivot_wider(Pheno_long_no_outlier, id_cols = IID, names_from = Variable, values_from = Value)
+##scale phenotype
+pheno_scaled <- Pheno_wide_no_outlier
+pheno_scaled[, c("Milk", "Fat", "Protein")] <- scale(Pheno_wide_no_outlier[, c("Milk", "Fat", "Protein")])
+pheno_scaled_long <- pheno_scaled %>%
+  pivot_longer(cols = all_of(c("Milk", "Fat", "Protein")), names_to = "Variable", values_to = "Value") %>%
+  filter(!is.na(Value))
+# Merge values for each trait and Dk and store them in list
+dataFinal <- merge(pheno_scaled_long, result_df, by = "IID")
+annot_covar <- merge(Pheno_milkyld, result_df, by = "IID")
+annot_covar <- annot_covar[,-c(2,3,4,5)]
+intercept <- rep(1, nrow(annot_covar))
+annot_covar <- cbind(annot_covar$IID, intercept, annot_covar[,-1])
+colnames(annot_covar) <- c("iid","intercept","Fg","cds","promoter","utr","intron","gerp")
+write.csv(annot_covar, "/90daydata/shared/chang.xu/filter_variants/group2/results_mky_all_Jercow/annot_covariate.csv", quote = F, row.names = F, sep = ",")
+pheno_scaled <- pheno_scaled %>%
+   mutate_all(~ ifelse(is.na(.), "", .))
+write.csv(pheno_scaled, "/90daydata/shared/chang.xu/filter_variants/group2/results_mky_all_Jercow/pheno_mky_f.csv", quote = F, row.names = F, sep = ",")
+analyseSingleTrait <- function(data, trait, formula){
+  frm <- as.formula(formula)
+  mod <- lm(frm,data=data)
+  mod_summary <- summary(mod)$coefficients[-1,]
+  Bt  <- mod_summary[,1]; SE <- mod_summary[,2]; Pval <- mod_summary[,4]
+  bk  <- (Bt[2:6]+Bt[1])*pi_k
+  Delta_k     <- 1 + Bt[2:6]/Bt[1]
+  Direction <- rep("", length(Delta_k))
+  Fold <- rep("", length(Delta_k))
+  for (i in 1:5){
+    if(Delta_k[i]>1){
+    Direction[i]="Enrichment"
+    Fold[i] = Delta_k[i]
+  }else{
+    Direction[i]="Depletion"
+    Fold[i] = 1-(Delta_k[i]-1) * Pik[i] / (1-Pik[i])
+  }
+  }  
+  # Calculate AIC, BIC, and log-likelihood
+  model_aic <- AIC(mod)
+  model_bic <- BIC(mod)
+  model_loglik <- as.numeric(logLik(mod))
+  
+  Result <- cbind.data.frame(Annotation=c("cds", "promoter", "utr", "intron", "gerp"), ID_genome=Bt[1],SE_ID_genome=SE[1],P_ID_genome=Pval[1], Gamma_k=Bt[2:6],SE_Gamma_k=SE[2:6],P_Gamma_k=Pval[2:6], Delta_k=Delta_k, bk=bk, Fold=Fold, Trait=trait, Direction=Direction, AIC = model_aic, BIC = model_bic, LogLikelihood = model_loglik)
+  return(Result)
+}
+traits <- unique(dataFinal$Variable)
+wg_results <- list()
+for (var in traits) {
+  trait_df <- dataFinal %>% filter(Variable == var)
+  mod    <- lm(Value~Fg,data=trait_df)
+  mod_summary <- summary(mod)$coefficients[-1,]
+  Bt  <- mod_summary[1]; SE <- mod_summary[2]; Pval <- mod_summary[4]
+  # Calculate AIC, BIC, and log-likelihood
+  model_aic <- AIC(mod)
+  model_bic <- BIC(mod)
+  model_loglik <- as.numeric(logLik(mod))
+  wg_result <- cbind.data.frame(ID_genome=Bt, SE_ID_genome=SE, PVal_ID_genome=Pval, AIC = model_aic, BIC = model_bic, LogLikelihood = model_loglik, Trait=var)
+  wg_results[[var]] <- wg_result
+}
+wg_ID <- data.frame(wg_results)
+write.csv(wg_ID, file = "/90daydata/shared/chang.xu/filter_variants/group2/results_mky_all_Jercow/Whole_genome_ID_lm_estimates", quote = F, row.names = F)
+results_F <- list()
+for (varf in traits) {
+  trait_df_F <- dataFinal %>% filter(Variable == varf) 
+  result_F <- analyseSingleTrait(trait_df_F, varf, "Value~Fg+cds_Dk+promoter_Dk+utr_Dk+intron_Dk+gerp_Dk")
+  results_F[[varf]] <- result_F
+}
+Enrichment_ID_F <- data.frame(results_F)
+write.csv(Enrichment_ID_F, file = "/90daydata/shared/chang.xu/filter_variants/group2/results_mky_all_Jercow/Enrichment_lm_singletrait_female", quote = F, row.names = F)
+```
